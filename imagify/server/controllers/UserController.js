@@ -204,87 +204,101 @@ const stripeInstance = new stripe(process.env.STRIPE_SECRET_KEY)
 
 // Payment API to add credits ( Stripe )
 const paymentStripe = async (req, res) => {
-    try {
+  try {
+    const { userId, planId } = req.body;
+    const originHeader = req.headers.origin;
+    const origin =
+      originHeader ||
+      process.env.FRONTEND_URL || // set this in Render, e.g. https://imagify-frontend.onrender.com
+      "";
 
-        const { userId, planId } = req.body
-        const { origin } = req.headers
-
-        const userData = await userModel.findById(userId)
-
-        // checking for planId and userdata
-        if (!userData || !planId) {
-            return res.json({ success: false, message: 'Invalid Credentials' })
-        }
-
-        let credits, plan, amount, date
-
-        // Switch Cases for different plans
-        switch (planId) {
-            case 'Basic':
-                plan = 'Basic'
-                credits = 100
-                amount = 10
-                break;
-
-            case 'Advanced':
-                plan = 'Advanced'
-                credits = 500
-                amount = 50
-                break;
-
-            case 'Business':
-                plan = 'Business'
-                credits = 5000
-                amount = 250
-                break;
-
-            default:
-                return res.json({ success: false, message: 'plan not found' })
-        }
-
-        date = Date.now()
-
-        // Creating Transaction Data
-        const transactionData = {
-            userId,
-            plan,
-            amount,
-            credits,
-            date
-        }
-
-        // Saving Transaction Data to Database
-        const newTransaction = await transactionModel.create(transactionData)
-
-        const currency = process.env.CURRENCY.toLocaleLowerCase()
-
-        // Creating line items to for Stripe
-        const line_items = [{
-            price_data: {
-                currency,
-                product_data: {
-                    name: "Credit Purchase"
-                },
-                unit_amount: transactionData.amount * 100
-            },
-            quantity: 1
-        }]
-
-        const session = await stripeInstance.checkout.sessions.create({
-            success_url: `${origin}/verify?success=true&transactionId=${newTransaction._id}`,
-            cancel_url: `${origin}/verify?success=false&transactionId=${newTransaction._id}`,
-            line_items: line_items,
-            mode: 'payment',
-        })
-        
-        res.json({ success: true, session_url: session.url });
-
-    } catch (error) {
-        console.log(error)
-        res.json({ success: false, message: error.message })
+    if (!userId || !planId) {
+      return res.json({ success: false, message: "Invalid Credentials" });
     }
-}
 
+    const userData = await userModel.findById(userId);
+    if (!userData) {
+      return res.json({ success: false, message: "User not found" });
+    }
+
+    // planId case-insensitive
+    const planKey = String(planId).toLowerCase();
+    let credits, plan, amountUsd;
+    switch (planKey) {
+      case "basic":
+        plan = "Basic";
+        credits = 100;
+        amountUsd = 10;
+        break;
+      case "advanced":
+        plan = "Advanced";
+        credits = 500;
+        amountUsd = 50;
+        break;
+      case "business":
+        plan = "Business";
+        credits = 5000;
+        amountUsd = 250;
+        break;
+      default:
+        return res.json({ success: false, message: "plan not found" });
+    }
+
+    const currency =
+      (process.env.CURRENCY && process.env.CURRENCY.toLowerCase()) || "inr";
+
+    // stripe price is in smallest unit
+    // If currency is INR → paise; USD → cents. Your amounts look like USD dollars.
+    // Adjust this to your business logic. If you're charging in INR, convert appropriately.
+    const unitAmount =
+      currency === "inr" ? Math.round(amountUsd * 100 * 83) : amountUsd * 100;
+    // ↑ Example: rough USD→INR conversion; ideally compute real INR prices upfront,
+    // or keep INR amounts in your switch above.
+
+    const date = Date.now();
+    const transactionData = {
+      userId,
+      plan,
+      amount: amountUsd, // store display currency amount; or store smallest unit separately
+      credits,
+      date
+    };
+
+    const newTransaction = await transactionModel.create(transactionData);
+
+    const line_items = [
+      {
+        price_data: {
+          currency,
+          product_data: { name: `Credit Purchase (${plan})` },
+          unit_amount: unitAmount
+        },
+        quantity: 1
+      }
+    ];
+
+    if (!origin) {
+      // Without a success/cancel URL, Stripe won't redirect. Fail early with a good error.
+      return res.status(400).json({
+        success: false,
+        message:
+          "Missing origin/FRONTEND_URL. Set FRONTEND_URL in env or send Origin header."
+      });
+    }
+
+    const session = await stripeInstance.checkout.sessions.create({
+      success_url: `${origin}/verify?success=true&transactionId=${newTransaction._id}`,
+      cancel_url: `${origin}/verify?success=false&transactionId=${newTransaction._id}`,
+      line_items,
+      mode: "payment"
+    });
+
+    return res.json({ success: true, session_url: session.url });
+  } catch (error) {
+    console.error("Stripe error:", error);
+    return res.json({ success: false, message: error.message });
+  }
+};
 // API Controller function to verify stripe payment
 const verifyStripe = async (req, res) => {
     try {
